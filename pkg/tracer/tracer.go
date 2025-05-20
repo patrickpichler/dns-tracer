@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"sync/atomic"
 
@@ -136,21 +135,7 @@ func (t *Tracer) Run(ctx context.Context) error {
 			continue
 		}
 
-		currentPos, err := r.Seek(0, io.SeekCurrent)
-		if err != nil {
-			t.log.Error("error while finding current offset in buffer",
-				slog.Any("error", err))
-			continue
-		}
-
-		payloadEnd := currentPos + int64(event.PayloadSize)
-		if len(record.RawSample) < int(payloadEnd) {
-			t.log.Error("malformed payload",
-				slog.Any("error", "payload end is after end of perf array sample"))
-			continue
-		}
-
-		rawPacket := record.RawSample[currentPos:payloadEnd]
+		rawPacket := event.Payload[:]
 
 		result, err := parseDNSMessage(rawPacket)
 		if err != nil {

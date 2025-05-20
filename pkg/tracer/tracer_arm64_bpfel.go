@@ -12,7 +12,10 @@ import (
 	"github.com/cilium/ebpf"
 )
 
-type tracerEvent struct{ PayloadSize uint32 }
+type tracerEvent struct {
+	PayloadSize uint32
+	Payload     [512]uint8
+}
 
 // loadTracer returns the embedded CollectionSpec for tracer.
 func loadTracer() (*ebpf.CollectionSpec, error) {

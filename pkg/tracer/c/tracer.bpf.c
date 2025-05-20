@@ -15,92 +15,39 @@ struct {
   __uint(max_entries, 1024 * 1024 /* 1 MB */);
 } events SEC(".maps");
 
+#define MAX_DNS_LEN 512
+
 struct event {
   u32 payload_size;
+  u8 payload[MAX_DNS_LEN];
 };
 
 // Force BTF for event struct to be exported.
 const struct event *unused_event __attribute__((unused));
 
-#define BUFFER_SIZE 256
-#define min(x, y) ((x) < (y) ? (x) : (y))
-
-int __always_inline submit(struct bpf_dynptr *payload) {
-  struct bpf_dynptr ringbuf_ptr;
-
-  u32 payload_size = bpf_dynptr_size(payload);
-
-  if (bpf_ringbuf_reserve_dynptr(&events, sizeof(struct event) + payload_size,
-                                 0, &ringbuf_ptr) < 0) {
-    goto error;
+int __always_inline submit(void *data, u16 len) {
+  if (len > MAX_DNS_LEN) {
+    return 1;
   }
 
-  struct event *evt = bpf_dynptr_data(&ringbuf_ptr, 0, sizeof(struct event));
+  struct event *evt = bpf_ringbuf_reserve(&events, sizeof(struct event), 0);
   if (!evt) {
-    goto error;
+    return 1;
   }
 
-  evt->payload_size = payload_size;
+  evt->payload_size = len;
 
-  // Until bpf_dynptr_copy lands in the kernel, we need to copy from the skb
-  // dynptr to the ringbuf dynptr in chunks.
-  // https://lore.kernel.org/bpf/20250221221400.672980-1-mykyta.yatsenko5@gmail.com/
-  u8 buf[BUFFER_SIZE];
-  void *chunk;
-  int chunk_size, off;
-  u32 i, chunk_cnt, err;
-
-  chunk_cnt = (payload_size + BUFFER_SIZE - 1) / BUFFER_SIZE;
-
-  bpf_for(i, 0, chunk_cnt) {
-    off = BUFFER_SIZE * i;
-    chunk_size = min(payload_size - off, BUFFER_SIZE);
-
-    // Force verifier to be happy and that we do not read outside our buffer.
-    asm volatile("%[size] &= 0xFFFF;\n" ::[size] "r"(chunk_size));
-    asm volatile("if %[size] <= %[max_size] goto +1;\n"
-                 "%[size] = %[max_size];\n" ::[size] "r"(chunk_size),
-                 [max_size] "i"(BUFFER_SIZE));
-
-    if (chunk_size == BUFFER_SIZE) {
-      chunk = bpf_dynptr_slice(payload, off, buf, BUFFER_SIZE);
-      if (!chunk) {
-        bpf_printk("BUG! NULL pkt slice pointer");
-        goto error;
-      }
-    } else {
-      err = bpf_dynptr_read(buf, chunk_size, payload, off, 0);
-      if (err) {
-        bpf_printk("BUG! Failed to read packet data err = %d", err);
-        goto error;
-      }
-      chunk = buf;
-    }
-
-    err = bpf_dynptr_write(&ringbuf_ptr, sizeof(struct event) + off, chunk,
-                           chunk_size, 0);
-    if (err) {
-      bpf_printk("BUG! Failed to write ringbuf data err = %d", err);
-      goto error;
-    }
+  if (bpf_probe_read_kernel(&evt->payload, len, data)) {
+    bpf_ringbuf_discard(evt, 0);
+    return 1;
   }
 
-  bpf_ringbuf_submit_dynptr(&ringbuf_ptr, 0);
+  bpf_ringbuf_submit(evt, 0);
+
   return 0;
-
-error:
-  bpf_ringbuf_discard_dynptr(&ringbuf_ptr, 0);
-  return 1;
 }
 
-SEC("cgroup_skb/ingress")
-int handle_ingress(struct __sk_buff *ctx) {
-
-  struct bpf_dynptr data;
-  if (bpf_dynptr_from_skb(ctx, 0, &data)) {
-    goto error;
-  }
-
+SEC("cgroup_skb/ingress") int handle_ingress(struct __sk_buff *ctx) {
   struct bpf_sock *sk = ctx->sk;
   if (!sk) {
     bpf_printk("no sock");
@@ -110,26 +57,29 @@ int handle_ingress(struct __sk_buff *ctx) {
   u32 offset = 0;
   u8 proto = 0;
 
+  void *data = (void *)(long)ctx->data;
+  void *data_end = (void *)(long)ctx->data_end;
+
   switch (ctx->family) {
   case AF_INET: {
-    struct iphdr *iphdrs =
-        bpf_dynptr_slice(&data, 0, NULL, bpf_core_type_size(struct iphdr));
-    if (!iphdrs) {
-      goto error;
+    struct iphdr *iphdrs = data;
+
+    if (data_end < data + sizeof(struct iphdr)) {
+      goto out;
     }
 
-    proto = BPF_CORE_READ(iphdrs, protocol);
     offset += iphdrs->ihl * 4;
+    proto = iphdrs->protocol;
   } break;
   case AF_INET6: {
-    struct ipv6hdr *iphdrs =
-        bpf_dynptr_slice(&data, 0, NULL, bpf_core_type_size(struct ipv6hdr));
-    if (!iphdrs) {
-      goto error;
+    struct ipv6hdr *iphdrs = data;
+
+    if (data_end < data + sizeof(struct ipv6hdr)) {
+      goto out;
     }
 
-    proto = BPF_CORE_READ(iphdrs, nexthdr);
-    offset += bpf_core_type_size(struct ipv6hdr);
+    proto = iphdrs->nexthdr;
+    offset += sizeof(struct ipv6hdr);
   } break;
   default:
     goto out;
@@ -140,11 +90,11 @@ int handle_ingress(struct __sk_buff *ctx) {
     goto out;
   }
 
-  struct udphdr *udphdr =
-      bpf_dynptr_slice(&data, offset, NULL, bpf_core_type_size(struct udphdr));
-  if (!udphdr) {
-    goto error;
+  if (data_end < data + offset + sizeof(struct udphdr)) {
+    goto out;
   }
+
+  struct udphdr *udphdr = data + offset;
 
   u16 src_port = bpf_ntohs(udphdr->source);
 
@@ -153,10 +103,13 @@ int handle_ingress(struct __sk_buff *ctx) {
     goto out;
   }
 
-  u16 datagram_len = bpf_ntohs(udphdr->len);
+  __s16 datagram_len = bpf_ntohs(udphdr->len);
+  if (datagram_len < 0) {
+    goto error;
+  }
 
   // For some reason the sk_buff didn't get the full datagram packet.
-  if (datagram_len != bpf_dynptr_size(&data) - offset) {
+  if (data_end < data + offset + datagram_len) {
     goto error;
   }
 
@@ -164,17 +117,7 @@ int handle_ingress(struct __sk_buff *ctx) {
   // bytes each (which makes it 8 byte).
   offset += 8;
 
-  struct bpf_dynptr payload;
-  if (bpf_dynptr_clone(&data, &payload)) {
-    goto error;
-  }
-
-  if (bpf_dynptr_adjust(&payload, offset, bpf_dynptr_size(&data))) {
-    goto error;
-  }
-
-  // TODO(patrick.pichler): look into parsing payload inside eBPF
-  submit(&payload);
+  submit(data + offset, data_end - (data + offset));
 
 error:
 out:
