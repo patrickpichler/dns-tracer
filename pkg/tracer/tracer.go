@@ -14,7 +14,7 @@ import (
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/patrickpichler/dns-tracer/pkg/cgroup"
-	"golang.org/x/net/dns/dnsmessage"
+	"golang.org/x/sys/unix"
 )
 
 type TracerCfg struct {
@@ -135,15 +135,13 @@ func (t *Tracer) Run(ctx context.Context) error {
 			continue
 		}
 
-		rawPacket := event.Payload[:]
-
-		result, err := parseDNSMessage(rawPacket)
-		if err != nil {
-			t.log.Error("error while parsing dns response",
-				slog.Any("error", err))
-		}
-
-		fmt.Printf("%d\t\t%s\t\t%s\t\t%s\n", result.transactionID, result.questionType, result.name, result.resultCode)
+		// TODO(patrick.pichler): make output nicer
+		fmt.Printf("%d\t\t%s\t\t%s\t\t%s\n",
+			event.Id,
+			typeToStr(event.Qtype),
+			unix.ByteSliceToString(event.Name[:]),
+			rcodeToStr(event.Rcode),
+		)
 
 		continue
 	}
@@ -156,67 +154,77 @@ type parsedDnsMsg struct {
 	resultCode    string
 }
 
-func parseDNSMessage(payload []byte) (parsedDnsMsg, error) {
-	parser := &dnsmessage.Parser{}
-	hdr, err := parser.Start(payload)
-	if err != nil {
-		return parsedDnsMsg{}, fmt.Errorf("error parsing header: %w", err)
-	}
-	question, err := parser.Question()
-	if err != nil {
-		return parsedDnsMsg{}, fmt.Errorf("error parsing question: %w", err)
-	}
+const (
+	RCodeSuccess        = 0 // NoError
+	RCodeFormatError    = 1 // FormErr
+	RCodeServerFailure  = 2 // ServFail
+	RCodeNameError      = 3 // NXDomain
+	RCodeNotImplemented = 4 // NotImp
+	RCodeRefused        = 5 // Refused
+)
 
-	return parsedDnsMsg{
-		transactionID: hdr.ID,
-		questionType:  typeToStr(question.Type),
-		name:          question.Name.String(),
-		resultCode:    rcodeToStr(hdr.RCode),
-	}, nil
-}
-
-func rcodeToStr(rcode dnsmessage.RCode) string {
+func rcodeToStr(rcode uint8) string {
 	switch rcode {
-	case dnsmessage.RCodeSuccess:
+	case RCodeSuccess:
 		return "Success"
-	case dnsmessage.RCodeFormatError:
+	case RCodeFormatError:
 		return "FormatError"
-	case dnsmessage.RCodeServerFailure:
+	case RCodeServerFailure:
 		return "ServerFailure"
-	case dnsmessage.RCodeNameError:
+	case RCodeNameError:
 		return "NameError"
-	case dnsmessage.RCodeNotImplemented:
+	case RCodeNotImplemented:
 		return "NotImplemented"
-	case dnsmessage.RCodeRefused:
+	case RCodeRefused:
 		return "RCodeRefused"
 	}
 
-	return "UNKNOWN"
+	return fmt.Sprintf("UNKNOWN (%d)", rcode)
 }
 
-func typeToStr(t dnsmessage.Type) string {
+const (
+	TypeA     = 1
+	TypeNS    = 2
+	TypeCNAME = 5
+	TypeSOA   = 6
+	TypePTR   = 12
+	TypeMX    = 15
+	TypeTXT   = 16
+	TypeAAAA  = 28
+	TypeSRV   = 33
+	TypeOPT   = 41
+
+	// Question.Type
+	TypeWKS   = 11
+	TypeHINFO = 13
+	TypeMINFO = 14
+	TypeAXFR  = 252
+	TypeALL   = 255
+)
+
+func typeToStr(t uint16) string {
 	switch t {
-	case dnsmessage.TypeA:
+	case TypeA:
 		return "A"
-	case dnsmessage.TypeAAAA:
+	case TypeAAAA:
 		return "AAAA"
-	case dnsmessage.TypeNS:
+	case TypeNS:
 		return "NS"
-	case dnsmessage.TypeCNAME:
+	case TypeCNAME:
 		return "CNAME"
-	case dnsmessage.TypeSOA:
+	case TypeSOA:
 		return "SOA"
-	case dnsmessage.TypePTR:
+	case TypePTR:
 		return "PTR"
-	case dnsmessage.TypeMX:
+	case TypeMX:
 		return "MX"
-	case dnsmessage.TypeTXT:
+	case TypeTXT:
 		return "TXT"
-	case dnsmessage.TypeSRV:
+	case TypeSRV:
 		return "SRV"
-	case dnsmessage.TypeOPT:
+	case TypeOPT:
 		return "OPT"
 	}
 
-	return "UNKNOWN"
+	return fmt.Sprintf("UNKNOWN (%d)", t)
 }

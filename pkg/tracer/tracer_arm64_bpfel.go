@@ -13,8 +13,10 @@ import (
 )
 
 type tracerEvent struct {
-	PayloadSize uint32
-	Payload     [512]uint8
+	Id    uint16
+	Qtype uint16
+	Rcode uint8
+	Name  [255]uint8
 }
 
 // loadTracer returns the embedded CollectionSpec for tracer.
@@ -66,7 +68,8 @@ type tracerProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type tracerMapSpecs struct {
-	Events *ebpf.MapSpec `ebpf:"events"`
+	Events      *ebpf.MapSpec `ebpf:"events"`
+	NameScratch *ebpf.MapSpec `ebpf:"name_scratch"`
 }
 
 // tracerVariableSpecs contains global variables before they are loaded into the kernel.
@@ -96,12 +99,14 @@ func (o *tracerObjects) Close() error {
 //
 // It can be passed to loadTracerObjects or ebpf.CollectionSpec.LoadAndAssign.
 type tracerMaps struct {
-	Events *ebpf.Map `ebpf:"events"`
+	Events      *ebpf.Map `ebpf:"events"`
+	NameScratch *ebpf.Map `ebpf:"name_scratch"`
 }
 
 func (m *tracerMaps) Close() error {
 	return _TracerClose(
 		m.Events,
+		m.NameScratch,
 	)
 }
 
