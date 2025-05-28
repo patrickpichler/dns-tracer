@@ -1,5 +1,8 @@
 # dns-tracer
 
+Simple tool that prints out any received DNS responses. The parsing of the DNS
+payload is done in eBPF.
+
 ## How to run
 
 The easiest way is to spawn a nix develop shell via
