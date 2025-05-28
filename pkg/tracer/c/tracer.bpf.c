@@ -164,6 +164,8 @@ SEC("cgroup_skb/ingress") int handle_ingress(struct __sk_buff *ctx) {
       goto error;
     }
 
+    // TODO(patrick.pichler): also handle other non data cases
+
     if (data_end < data + offset + cursor + data_size) {
       bpf_printk("BUG! tried reading out of bounds while reading data");
       goto error;
